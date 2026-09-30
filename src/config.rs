@@ -80,15 +80,20 @@ impl DeviceConfig {
     }
 
     pub fn is_unmapped(&self) -> bool {
-        self.mappings.is_empty()
-            && self.long_press_mappings.is_empty()
-            && self.dpad_mappings.is_empty()
-            && self.dpad_longpress_mappings.is_empty()
-            && self.trigger_mappings.is_empty()
-            && self.trigger_longpress_mappings.is_empty()
-            && self.stick_left_mappings.is_empty()
-            && self.stick_right_mappings.is_empty()
-            && self.gesture_mappings.is_empty()
+        self.scripts().next().is_none()
+    }
+
+    pub fn scripts(&self) -> impl Iterator<Item = &String> {
+        self.mappings
+            .values()
+            .chain(self.long_press_mappings.values())
+            .chain(self.dpad_mappings.values())
+            .chain(self.dpad_longpress_mappings.values())
+            .chain(self.trigger_mappings.values())
+            .chain(self.trigger_longpress_mappings.values())
+            .chain(self.stick_left_mappings.values())
+            .chain(self.stick_right_mappings.values())
+            .chain(self.gesture_mappings.values())
     }
 
     #[cfg(test)]

@@ -8,10 +8,11 @@ use std::mem;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
-use std::sync::{Mutex, Once, OnceLock};
+use std::sync::{Mutex, MutexGuard, Once, OnceLock};
 use std::time::{Duration, Instant};
 use std::thread;
 
+const RELEASE_AFTER: Duration = Duration::from_secs(5);
 const UINPUT_DEV: &str = "/dev/uinput";
 const SYS_UINPUT: &str = "/sys/class/misc/uinput";
 const TARGET_FILE: &str = "/var/run/kindle-button-mapper-key-target";
@@ -69,7 +70,7 @@ struct UinputUserDev {
     absflat: [i32; ABS_CNT],
 }
 
-pub fn try_init() -> Option<File> {
+fn try_init() -> Option<File> {
     if let Err(e) = ensure_uinput_node() {
         warn!("{} unavailable: {} — keyboard mappings will not inject events", UINPUT_DEV, e);
         return None;
@@ -102,8 +103,56 @@ pub fn try_init() -> Option<File> {
 static INJECTOR: OnceLock<Mutex<Injector>> = OnceLock::new();
 
 struct Injector {
-    dev: Option<File>,
     pager: Pager,
+}
+
+static KEYBOARD: Mutex<Keyboard> = Mutex::new(Keyboard {
+    dev: None,
+    users: 0,
+    idle_since: None,
+});
+
+struct Keyboard {
+    dev: Option<File>,
+    users: usize,
+    idle_since: Option<Instant>,
+}
+
+fn keyboard() -> MutexGuard<'static, Keyboard> {
+    KEYBOARD.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+pub struct Hold(());
+
+pub fn hold() -> Hold {
+    let mut k = keyboard();
+    k.users += 1;
+    k.idle_since = None;
+    if k.dev.is_none() {
+        k.dev = try_init();
+    }
+    Hold(())
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        let mut k = keyboard();
+        k.users -= 1;
+        if k.users == 0 {
+            k.idle_since = Some(Instant::now());
+        }
+    }
+}
+
+pub fn release_idle() {
+    let mut k = keyboard();
+    if k.users > 0 || !k.idle_since.is_some_and(|t| t.elapsed() >= RELEASE_AFTER) {
+        return;
+    }
+    k.idle_since = None;
+    if k.dev.take().is_some() {
+        info!("Virtual keyboard removed, no connected device needs it");
+    }
 }
 
 /// Inject a key name, a key code, `page_next` or `page_prev`. False means there
@@ -117,25 +166,13 @@ pub fn inject(request: &str) -> bool {
     true
 }
 
-/// Whether there is a uinput keyboard to emit into at all. Passthrough is a
-/// promise the daemon cannot keep without one.
-pub fn available() -> bool {
-    INJECTOR
-        .get()
-        .map(|i| i.lock().unwrap_or_else(|p| p.into_inner()).dev.is_some())
-        .unwrap_or(false)
-}
-
 /// Re-emit a key the mapper grabbed but has no mapping for, so a device the
 /// mapper owns exclusively still types. `value` is evdev's own: 1 press,
 /// 0 release, 2 repeat. False means there is no uinput keyboard to emit into,
 /// in which case the key is simply lost and the caller should say so.
 pub fn forward(code: u16, value: i32) -> bool {
-    let Some(injector) = INJECTOR.get() else {
-        return false;
-    };
-    let mut injector = injector.lock().unwrap_or_else(|p| p.into_inner());
-    let Some(ref mut dev) = injector.dev else {
+    let mut k = keyboard();
+    let Some(ref mut dev) = k.dev else {
         return false;
     };
     if let Err(e) = write_event(dev, EV_KEY, code, value)
@@ -151,18 +188,13 @@ pub fn forward(code: u16, value: i32) -> bool {
 ///
 /// scripts/key.sh writes to it, so nothing on the device needs an external
 /// injector binary — evemu-event is not shipped on stock firmware.
-///
-/// `dev` is the uinput keyboard, which is absent on firmware without the
-/// driver. Page turns still go in through the page buttons there, so the FIFO
-/// is only pointless when neither exists, and it stays unopened in that case so
-/// key.sh fails and scripts/kindle.sh can fall back to a tap.
-pub fn serve(dev: Option<File>) {
+pub fn serve() {
     let pager = Pager::find();
-    if dev.is_none() && matches!(pager, Pager::VirtualKeyboard) {
+    if matches!(pager, Pager::VirtualKeyboard) && ensure_uinput_node().is_err() {
         warn!("No page buttons and no uinput keyboard — nothing to inject into, use the tap page turn actions");
         return;
     }
-    if INJECTOR.set(Mutex::new(Injector { dev, pager })).is_err() {
+    if INJECTOR.set(Mutex::new(Injector { pager })).is_err() {
         warn!("Virtual keyboard already serving");
         return;
     }
@@ -190,7 +222,7 @@ pub fn retry() {
     if INJECTOR.get().is_some() || !driver_registered() {
         return;
     }
-    ONCE.call_once(|| serve(try_init()));
+    ONCE.call_once(serve);
 }
 
 fn fifo_loop() {
@@ -220,13 +252,12 @@ fn fifo_loop() {
 
 impl Injector {
     fn handle(&mut self, line: &str) {
-        let Injector { dev, pager } = self;
         match line {
             "" => (),
-            "page_next" => pager.turn(dev.as_mut(), true),
-            "page_prev" => pager.turn(dev.as_mut(), false),
+            "page_next" => self.pager.turn(true),
+            "page_prev" => self.pager.turn(false),
             _ => match crate::config::parse_key(line) {
-                Some(key) => match dev {
+                Some(key) => match keyboard().dev.as_mut() {
                     Some(vkbd) => {
                         if let Err(e) = tap(vkbd, key.code()) {
                             warn!("Injecting {} failed: {}", line, e);
@@ -292,7 +323,7 @@ impl Pager {
         }
     }
 
-    fn turn(&mut self, vkbd: Option<&mut File>, forward: bool) {
+    fn turn(&mut self, forward: bool) {
         match self {
             Pager::Buttons {
                 path,
@@ -330,14 +361,13 @@ impl Pager {
                 if crate::xkey::send_page(page_code) {
                     return;
                 }
-                match vkbd {
+                match keyboard().dev.as_mut() {
                     Some(vkbd) => {
                         let kbd_code = if forward { KEY_DOWN } else { KEY_UP };
                         if let Err(e) = tap(vkbd, kbd_code) {
                             warn!("Page turn failed: {}", e);
                         }
                     }
-                    // serve() does not open the FIFO in this case.
                     None => warn!("Page turn failed, no uinput keyboard"),
                 }
             }
@@ -644,4 +674,8 @@ fn supported_keys() -> impl Iterator<Item = u32> {
     // 0x2c0+ trigger-happy) are skipped so the device enumerates as a
     // plain keyboard.
     (1..0x100).chain(0x160..0x2c0)
+}
+
+pub fn is_key(code: u16) -> bool {
+    supported_keys().any(|c| c == u32::from(code))
 }

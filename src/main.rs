@@ -106,11 +106,7 @@ fn main() {
 
     reload::publish(&config);
 
-    // Virtual keyboard via uinput — kept alive for the daemon's lifetime by the
-    // FIFO thread, which injects the keys scripts/key.sh asks for. Page turns
-    // on a model with page buttons go into that node instead, so the FIFO is
-    // worth serving even where uinput is missing.
-    vkeyboard::serve(vkeyboard::try_init());
+    vkeyboard::serve();
 
     // System-wide XKB override, set up once. First device that names a layout wins.
     let _layout = config
@@ -136,6 +132,7 @@ fn main() {
             spawn_worker(device, settings.clone());
         }
         vkeyboard::retry();
+        vkeyboard::release_idle();
         thread::sleep(Duration::from_millis(200));
     }
 }
@@ -255,12 +252,6 @@ fn device_worker(mut cfg: config::DeviceConfig, mut settings: WorkerSettings) {
                 if downgrade_relay(&mut cfg, grab) {
                     mapper = Mapper::new(&cfg, &settings);
                 }
-                if grab && cfg.passthrough && !vkeyboard::available() {
-                    warn!(
-                        "[{}] passthrough is on but there is no uinput keyboard, unmapped keys will be lost",
-                        cfg.id
-                    );
-                }
                 if grab && cfg.mouse && !vkeyboard::pointer_ready() {
                     warn!(
                         "[{}] no uinput pointer, the cursor will not move while we hold the mouse",
@@ -329,6 +320,7 @@ fn run_event_loop(
             .is_some_and(|a| a.contains(evdev::AbsoluteAxisType::ABS_MT_POSITION_X));
     let mut grab = grab;
     let mut grabbed = grab;
+    let mut keyboard = wants_keyboard(cfg, device).then(vkeyboard::hold);
 
     let mut last_poke: Option<Instant> = if settings.keep_awake {
         execute_script(KEEP_AWAKE_RELEASE);
@@ -365,6 +357,10 @@ fn run_event_loop(
                     downgrade_relay(&mut fresh, grab);
                     *mapper = Mapper::new(&fresh, settings);
                     *cfg = fresh;
+                    let want = wants_keyboard(cfg, device);
+                    if want != keyboard.is_some() {
+                        keyboard = want.then(vkeyboard::hold);
+                    }
                 }
                 None => {
                     info!("[{}] gone from the config, releasing the device", cfg.id);
@@ -485,6 +481,14 @@ fn run_event_loop(
 /// claimed, since grabbing a keyboard would swallow every key nothing maps.
 fn effective_grab(cfg: &config::DeviceConfig, gamepad: bool) -> bool {
     cfg.grab && (cfg.grab_explicit || gamepad || cfg.mouse)
+}
+
+fn wants_keyboard(cfg: &config::DeviceConfig, device: &evdev::Device) -> bool {
+    let relays_keys = (cfg.passthrough || cfg.mouse)
+        && device
+            .supported_keys()
+            .is_some_and(|keys| keys.iter().any(|k| vkeyboard::is_key(k.code())));
+    relays_keys || cfg.scripts().any(|s| action::sends_keys(s))
 }
 
 /// Relaying a device we do not hold would deliver everything twice. True when

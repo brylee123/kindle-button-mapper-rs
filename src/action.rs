@@ -134,6 +134,20 @@ fn injectable(cmd: &str) -> Option<String> {
     }
 }
 
+pub fn sends_keys(script: &str) -> bool {
+    let words: Vec<&str> = script
+        .split(|c: char| c.is_whitespace() || "|&;()`\"'".contains(c))
+        .filter(|w| !w.is_empty())
+        .collect();
+    words
+        .windows(2)
+        .any(|w| match w[0].rsplit('/').next().unwrap_or("") {
+            "key.sh" => crate::config::parse_key(w[1]).is_some(),
+            "kindle.sh" | "auto.sh" => native_key(w[1]).is_some_and(|k| !k.starts_with("page_")),
+            _ => false,
+        })
+}
+
 fn koreader_event(cmd: &str) -> Option<&'static str> {
     match cmd {
         "next_page" => Some("GotoViewRel/1"),

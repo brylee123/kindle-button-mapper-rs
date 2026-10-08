@@ -58,7 +58,7 @@ const ACTIONS: &[(&str, &str, &str)] = &[
     ("koreader", "font_down 1", "Font -1"),
     ("koreader", "menu", "Show menu"),
     ("koreader", "toggle_status_bar", "Toggle status bar"),
-    ("koreader", "rotate", "Rotate 90° clockwise"),
+    ("koreader", "rotate", "Rotate screen"),
 ];
 
 static CAPTURE_LOCK: Mutex<()> = Mutex::new(());

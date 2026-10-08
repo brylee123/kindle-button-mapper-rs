@@ -49,12 +49,16 @@ const ACTIONS: &[(&str, &str, &str)] = &[
     ("koreader", "brightness 10", "Brightness +10"),
     ("koreader", "brightness -10", "Brightness -10"),
     ("koreader", "brightness_toggle", "Toggle frontlight"),
+    ("koreader", "warmth 1", "Warmth +1"),
+    ("koreader", "warmth -1", "Warmth -1"),
+    ("koreader", "warmth 5", "Warmth +5"),
+    ("koreader", "warmth -5", "Warmth -5"),
     ("koreader", "night_mode", "Toggle night mode"),
     ("koreader", "font_up 1", "Font +1"),
     ("koreader", "font_down 1", "Font -1"),
     ("koreader", "menu", "Show menu"),
     ("koreader", "toggle_status_bar", "Toggle status bar"),
-    ("koreader", "rotate", "Rotate screen"),
+    ("koreader", "rotate", "Rotate 90° clockwise"),
 ];
 
 static CAPTURE_LOCK: Mutex<()> = Mutex::new(());
